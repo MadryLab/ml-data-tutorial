@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torchvision
 
+from matplotlib import pyplot as plt
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, lr_scheduler
@@ -117,24 +118,24 @@ def train_on_subset(subset):
     return train(model, loader)
 
 
-def record_output(model, target_example):
-    # record the output of the model on the target example
-    image, label = target_example
-    image = image.cuda()
-    label = torch.Tensor(label).to(torch.int64).cuda()
-    logits = model(image.unsqueeze(0))
+def record_outputs(model, target_examples):
+    # record the margin of the model on the target example
+    images, labels = target_examples
+    images = images.cuda()
+    labels = labels.cuda()
+    logits = model(images)
     bindex = torch.arange(logits.shape[0]).to(logits.device, non_blocking=False)
-    logits_correct = logits[bindex, label.unsqueeze(0)]
+    logits_correct = logits[bindex, labels]
 
     cloned_logits = logits.clone()
     # remove the logits of the correct labels from the sum
     # in logsumexp by setting to -ch.inf
-    cloned_logits[bindex, label.unsqueeze(0)] = torch.tensor(
+    cloned_logits[bindex, labels] = torch.tensor(
         -torch.inf, device=logits.device, dtype=logits.dtype
     )
 
     margins = logits_correct - cloned_logits.logsumexp(dim=-1)
-    return margins.sum().item()
+    return margins.clone().detach().cpu()
 
 
 def get_loader(
@@ -170,12 +171,40 @@ def get_loader(
     dataset = torchvision.datasets.CIFAR10(
         root="/tmp/cifar/", download=True, train=is_train, transform=transforms
     )
+    # we are only going to use 5000 training samples from the CIFAR-10 training set
+    # 2500 from the "cat" class, and 2500 from the "dog" class
+    if is_train:
+        cats = np.where(np.array(dataset.targets) == 3)[0][:2500]
+        dogs = np.where(np.array(dataset.targets) == 5)[0][:2500]
+        inds = np.concatenate([cats, dogs])
 
-    if indices is not None:
-        dataset = torch.utils.data.Subset(dataset, indices)
+        # further subsetting (e.g., used when computing the linear datamodeling score)
+        if indices is not None:
+            inds = inds[indices]
+
+        dataset = torch.utils.data.Subset(dataset, sorted(inds))
 
     loader = torch.utils.data.DataLoader(
         dataset=dataset, shuffle=shuffle, batch_size=batch_size, num_workers=num_workers
     )
 
     return loader
+
+
+def plot_images(tensors, title=None):
+    if len(tensors) == 1:
+        fig, ax = plt.subplots(1, 1, figsize=(1, 1))
+        ax.axis("off")
+        image = tensors[0].permute(1, 2, 0).cpu().numpy()
+        image = (image - np.min(image)) / (np.max(image) - np.min(image))
+        ax.imshow(image)
+        fig.show()
+    else:
+        fig, axes = plt.subplots(1, len(tensors), figsize=(1, len(tensors)))
+        fig.suptitle(title, fontsize=11)
+        for ax, tensor in zip(axes, tensors):
+            ax.axis("off")
+            image = tensor.permute(1, 2, 0).cpu().numpy()
+            image = (image - np.min(image)) / (np.max(image) - np.min(image))
+            ax.imshow(image)
+        fig.show()
